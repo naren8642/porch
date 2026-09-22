@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Porch — a private call for two</title>
+<style>
+  :root {
+    --stage: #0e0f12;
+    --surface: #1a1c21;
+    --surface-hi: #24272e;
+    --line: #32363f;
+    --ink: #e8e6e1;
+    --ink-dim: #8a8f98;
+    --accent: #6e8bc9;
+    --danger: #e05252;
+    --live: #4fb477;
+    --r: 14px;
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  *, *::before, *::after { box-sizing: inherit; }
+
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--stage);
+    color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: 16px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+  button { font: inherit; color: inherit; cursor: pointer; }
+  button:focus-visible, a:focus-visible, input:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* ---------- Start screen ---------- */
+  #start {
+    height: 100%;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+  }
+  .panel {
+    width: 100%;
+    max-width: 30rem;
+    text-align: center;
+  }
+  .panel h1 {
+    font-size: clamp(2rem, 7vw, 2.75rem);
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    margin: 0 0 0.4em;
+  }
+  .panel p {
+    color: var(--ink-dim);
+    margin: 0 auto 2rem;
+    max-width: 26rem;
+  }
+  .btn {
+    border: 1px solid var(--line);
+    background: var(--surface);
+    border-radius: 999px;
+    padding: 0.85rem 1.6rem;
+    font-weight: 500;
+    transition: background 120ms ease, border-color 120ms ease;
+  }
+  .btn:hover { background: var(--surface-hi); border-color: #444a56; }
+  .btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #0b1020;
+    font-weight: 600;
+  }
+  .btn-primary:hover { background: #8399d2; border-color: #8399d2; }
+  .btn[disabled] { opacity: 0.5; cursor: default; }
+
+  /* ---------- Call stage ---------- */
+  #stage { position: relative; height: 100%; display: none; }
+  #stage.on { display: block; }
+
+  #remote {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    background: #000;
+    display: block;
+  }
+  #remote.idle { opacity: 0; }
+
+  #waiting {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    text-align: center;
+  }
+  #waiting.hide { display: none; }
+  #waiting .code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: clamp(1.5rem, 6vw, 2rem);
+    letter-spacing: 0.12em;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    padding: 0.6rem 1rem;
+    display: inline-block;
+    margin: 0.75rem 0 1.25rem;
+  }
+  #waiting p { color: var(--ink-dim); margin: 0 auto; max-width: 24rem; }
+
+  #local {
+    position: absolute;
+    right: 16px;
+    bottom: calc(96px + env(safe-area-inset-bottom, 0px));
+    width: 28vw;
+    max-width: 180px;
+    aspect-ratio: 3 / 4;
+    object-fit: cover;
+    border-radius: var(--r);
+    border: 1px solid var(--line);
+    background: #000;
+    transform: scaleX(-1);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+  }
+  @media (min-width: 640px) { #local { aspect-ratio: 4 / 3; width: 22vw; } }
+
+  #status {
+    position: absolute;
+    top: calc(14px + env(safe-area-inset-top, 0px));
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(26,28,33,0.85);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 0.35rem 0.9rem;
+    font-size: 0.85rem;
+    color: var(--ink-dim);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    white-space: nowrap;
+    max-width: calc(100% - 32px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #status .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--ink-dim);
+    flex: none;
+  }
+  #status.live .dot { background: var(--live); }
+  #status.bad .dot { background: var(--danger); }
+
+  #controls {
+    position: absolute;
+    left: 50%;
+    bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+    transform: translateX(-50%);
+    display: flex;
+    gap: 10px;
+    background: rgba(26,28,33,0.85);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 8px;
+  }
+  .ctl {
+    width: 52px; height: 52px;
+    border-radius: 50%;
+    border: none;
+    background: var(--surface-hi);
+    display: grid;
+    place-items: center;
+    transition: background 120ms ease;
+  }
+  .ctl:hover { background: #30343d; }
+  .ctl.off { background: var(--ink); color: var(--stage); }
+  .ctl.hangup { background: var(--danger); color: #fff; }
+  .ctl.hangup:hover { background: #ee6a6a; }
+  .ctl svg { width: 22px; height: 22px; fill: currentColor; }
+
+  .toast {
+    position: absolute;
+    bottom: calc(92px + env(safe-area-inset-bottom, 0px));
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--ink);
+    color: var(--stage);
+    border-radius: 999px;
+    padding: 0.4rem 0.9rem;
+    font-size: 0.85rem;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 180ms ease;
+  }
+  .toast.show { opacity: 1; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ============ Start screen ============ -->
+<section id="start">
+  <div class="panel">
+    <h1 id="startTitle">Porch</h1>
+    <p id="startCopy">A private video call for two. No accounts, no downloads — just a link.</p>
+    <button class="btn btn-primary" id="goBtn">Start a call</button>
+    <p id="err" style="color:var(--danger); margin-top:1.25rem; display:none;"></p>
+  </div>
+</section>
+
+<!-- ============ Call stage ============ -->
+<section id="stage">
+  <video id="remote" class="idle" autoplay playsinline></video>
+
+  <div id="waiting">
+    <div>
+      <p>Send this link to the other person.</p>
+      <div class="code" id="codeText">—</div>
+      <div>
+        <button class="btn" id="copyBtn">Copy link</button>
+      </div>
+      <p style="margin-top:1.25rem;">The call connects on its own once they open it.</p>
+    </div>
+  </div>
+
+  <video id="local" autoplay playsinline muted></video>
+
+  <div id="status"><span class="dot"></span><span id="statusText">Starting…</span></div>
+
+  <div id="controls">
+    <button class="ctl" id="micBtn" aria-label="Mute microphone" title="Mute microphone">
+      <svg viewBox="0 0 24 24"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z"/></svg>
+    </button>
+    <button class="ctl" id="camBtn" aria-label="Turn camera off" title="Turn camera off">
+      <svg viewBox="0 0 24 24"><path d="M17 10.5V7a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3.5l4 3.5V7l-4 3.5Z"/></svg>
+    </button>
+    <button class="ctl hangup" id="endBtn" aria-label="End call" title="End call">
+      <svg viewBox="0 0 24 24"><path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08a.996.996 0 0 1-.29-.7c0-.28.11-.53.29-.71C3.34 8.78 7.46 7 12 7s8.66 1.78 11.71 4.67c.18.18.29.43.29.71 0 .28-.11.53-.29.71l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.1-.7-.28a11.27 11.27 0 0 0-2.67-1.85.998.998 0 0 1-.56-.9v-3.1C15.15 9.25 13.6 9 12 9Z"/></svg>
+    </button>
+  </div>
+
+  <div class="toast" id="toast">Link copied</div>
+</section>
+
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  // ---------------------------------------------------------------------
+  // Config
+  // ---------------------------------------------------------------------
+  // Home-to-home over residential internet almost always works with STUN
+  // alone. If you ever need to call from an office or over a VPN, sign up
+  // for a free TURN account and add the servers here.
+  var ICE = {
+    iceServers: [
+      { urls: "stun:stun.l.google.com:19302" },
+      { urls: "stun:stun1.l.google.com:19302" }
+      // , { urls: "turn:YOUR.turn.host:443", username: "...", credential: "..." }
+    ]
+  };
+
+  var PREFIX = "porch-";      // namespaces our IDs on the shared public broker
+  var DIAL_RETRY_MS = 4000;   // how often the guest re-dials until answered
+
+  // ---------------------------------------------------------------------
+  // State
+  // ---------------------------------------------------------------------
+  var localStream = null;
+  var peer = null;
+  var call = null;
+  var role = null;            // "host" | "guest"
+  var room = null;
+  var dialTimer = null;
+  var connected = false;
+
+  // ---------------------------------------------------------------------
+  // Elements
+  // ---------------------------------------------------------------------
+  var el = {
+    start: document.getElementById("start"),
+    startTitle: document.getElementById("startTitle"),
+    startCopy: document.getElementById("startCopy"),
+    goBtn: document.getElementById("goBtn"),
+    err: document.getElementById("err"),
+    stage: document.getElementById("stage"),
+    remote: document.getElementById("remote"),
+    local: document.getElementById("local"),
+    waiting: document.getElementById("waiting"),
+    codeText: document.getElementById("codeText"),
+    copyBtn: document.getElementById("copyBtn"),
+    status: document.getElementById("status"),
+    statusText: document.getElementById("statusText"),
+    micBtn: document.getElementById("micBtn"),
+    camBtn: document.getElementById("camBtn"),
+    endBtn: document.getElementById("endBtn"),
+    toast: document.getElementById("toast")
+  };
+
+  function setStatus(text, kind) {
+    el.statusText.textContent = text;
+    el.status.className = kind || "";
+  }
+
+  function showError(msg) {
+    el.err.textContent = msg;
+    el.err.style.display = "block";
+    el.goBtn.disabled = false;
+  }
+
+  function toast(msg) {
+    el.toast.textContent = msg;
+    el.toast.classList.add("show");
+    setTimeout(function () { el.toast.classList.remove("show"); }, 1800);
+  }
+
+  function newRoomCode() {
+    var alphabet = "abcdefghjkmnpqrstuvwxyz23456789"; // no look-alikes
+    var out = "";
+    var bytes = new Uint8Array(8);
+    crypto.getRandomValues(bytes);
+    for (var i = 0; i < bytes.length; i++) out += alphabet[bytes[i] % alphabet.length];
+    return out;
+  }
+
+  // ---------------------------------------------------------------------
+  // Entry
+  // ---------------------------------------------------------------------
+  var hashRoom = location.hash.replace(/^#/, "").trim();
+
+  if (hashRoom) {
+    el.startTitle.textContent = "Join the call";
+    el.startCopy.textContent = "Your camera and microphone turn on when you join. Nothing is recorded.";
+    el.goBtn.textContent = "Join call";
+  }
+
+  el.goBtn.addEventListener("click", function () {
+    el.goBtn.disabled = true;
+    el.err.style.display = "none";
+    room = hashRoom || newRoomCode();
+    location.hash = room;
+    begin();
+  });
+
+  async function begin() {
+    try {
+      localStream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: { echoCancellation: true, noiseSuppression: true }
+      });
+    } catch (e) {
+      if (e && (e.name === "NotAllowedError" || e.name === "SecurityError")) {
+        showError("Camera and microphone access was blocked. Allow it in your browser's site settings, then try again.");
+      } else if (e && e.name === "NotFoundError") {
+        showError("No camera or microphone found on this device.");
+      } else {
+        showError("Couldn't start the camera: " + (e && e.message ? e.message : "unknown error"));
+      }
+      return;
+    }
+
+    el.local.srcObject = localStream;
+    el.start.style.display = "none";
+    el.stage.classList.add("on");
+
+    el.codeText.textContent = room;
+    setStatus("Connecting…");
+
+    becomeHost();
+  }
+
+  // ---------------------------------------------------------------------
+  // Signaling: first person to claim the host ID is the host; the second
+  // gets "unavailable-id" back, flips to guest, and dials the host.
+  // ---------------------------------------------------------------------
+  function hostId(r) { return PREFIX + r + "-h"; }
+  function guestId(r) { return PREFIX + r + "-g"; }
+
+  function becomeHost() {
+    peer = new Peer(hostId(room), { config: ICE });
+
+    peer.on("open", function () {
+      role = "host";
+      setStatus("Waiting for the other person");
+    });
+
+    peer.on("call", function (incoming) {
+      incoming.answer(localStream);
+      wireCall(incoming);
+    });
+
+    peer.on("error", function (e) {
+      if (e.type === "unavailable-id" && role === null) {
+        peer.destroy();
+        becomeGuest();
+      } else {
+        handlePeerError(e);
+      }
+    });
+
+    peer.on("disconnected", function () { if (peer && !peer.destroyed) peer.reconnect(); });
+  }
+
+  function becomeGuest() {
+    peer = new Peer(guestId(room), { config: ICE });
+
+    peer.on("open", function () {
+      role = "guest";
+      setStatus("Ringing…");
+      dial();
+      dialTimer = setInterval(function () { if (!connected) dial(); }, DIAL_RETRY_MS);
+    });
+
+    peer.on("call", function (incoming) {   // host re-dialled us after a drop
+      incoming.answer(localStream);
+      wireCall(incoming);
+    });
+
+    peer.on("error", function (e) {
+      if (e.type === "unavailable-id") {
+        setStatus("This call already has two people in it", "bad");
+      } else if (e.type === "peer-unavailable") {
+        if (!connected) setStatus("Waiting for the other person");
+      } else {
+        handlePeerError(e);
+      }
+    });
+
+    peer.on("disconnected", function () { if (peer && !peer.destroyed) peer.reconnect(); });
+  }
+
+  function dial() {
+    if (!peer || peer.destroyed || connected) return;
+    var outgoing = peer.call(hostId(room), localStream);
+    if (outgoing) wireCall(outgoing);
+  }
+
+  function wireCall(mediaConn) {
+    call = mediaConn;
+
+    mediaConn.on("stream", function (remoteStream) {
+      connected = true;
+      clearInterval(dialTimer);
+      el.remote.srcObject = remoteStream;
+      el.remote.classList.remove("idle");
+      el.waiting.classList.add("hide");
+      setStatus("Connected", "live");
+
+      // Safari sometimes needs the play() nudge.
+      var p = el.remote.play();
+      if (p && p.catch) p.catch(function () {});
+    });
+
+    mediaConn.on("close", function () { onPeerGone(); });
+    mediaConn.on("error", function () { if (!connected) setStatus("Trouble connecting — retrying", "bad"); });
+  }
+
+  function onPeerGone() {
+    connected = false;
+    el.remote.srcObject = null;
+    el.remote.classList.add("idle");
+    el.waiting.classList.remove("hide");
+    setStatus("The other person left");
+    if (role === "guest" && !dialTimer) {
+      dialTimer = setInterval(function () { if (!connected) dial(); }, DIAL_RETRY_MS);
+    }
+  }
+
+  function handlePeerError(e) {
+    var msg = "Connection problem";
+    if (e.type === "network") msg = "Lost the signaling server — reconnecting";
+    else if (e.type === "browser-incompatible") msg = "This browser doesn't support video calling";
+    else if (e.type === "server-error") msg = "Signaling server unreachable";
+    setStatus(msg, "bad");
+  }
+
+  // ---------------------------------------------------------------------
+  // Controls
+  // ---------------------------------------------------------------------
+  el.micBtn.addEventListener("click", function () {
+    var t = localStream.getAudioTracks()[0];
+    if (!t) return;
+    t.enabled = !t.enabled;
+    el.micBtn.classList.toggle("off", !t.enabled);
+    el.micBtn.title = el.micBtn.ariaLabel = t.enabled ? "Mute microphone" : "Unmute microphone";
+    toast(t.enabled ? "Microphone on" : "Microphone muted");
+  });
+
+  el.camBtn.addEventListener("click", function () {
+    var t = localStream.getVideoTracks()[0];
+    if (!t) return;
+    t.enabled = !t.enabled;
+    el.camBtn.classList.toggle("off", !t.enabled);
+    el.camBtn.title = el.camBtn.ariaLabel = t.enabled ? "Turn camera off" : "Turn camera on";
+    toast(t.enabled ? "Camera on" : "Camera off");
+  });
+
+  el.endBtn.addEventListener("click", hangUp);
+
+  el.copyBtn.addEventListener("click", async function () {
+    var link = location.origin + location.pathname + "#" + room;
+    try {
+      await navigator.clipboard.writeText(link);
+      toast("Link copied");
+    } catch (e) {
+      prompt("Copy this link:", link);
+    }
+  });
+
+  function hangUp() {
+    clearInterval(dialTimer);
+    if (call) { try { call.close(); } catch (e) {} }
+    if (peer) { try { peer.destroy(); } catch (e) {} }
+    if (localStream) localStream.getTracks().forEach(function (t) { t.stop(); });
+    location.hash = "";
+    location.reload();
+  }
+
+  window.addEventListener("beforeunload", function () {
+    if (peer) { try { peer.destroy(); } catch (e) {} }
+  });
+})();
+</script>
+</body>
+</html>
