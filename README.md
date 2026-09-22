@@ -6,7 +6,7 @@ A private one-to-one video call in the browser. No accounts, no install, no serv
 
 - **Media** — WebRTC, browser to browser. Audio and video never touch a server; they go directly between the two machines and are encrypted end to end by the protocol.
 - **Signaling** — the free public [PeerJS](https://peerjs.com) broker relays the connection handshake (SDP offers, ICE candidates). It sees who is connecting, not what you say.
-- **NAT traversal** — Google's public STUN servers only. For two homes on ordinary residential internet this connects directly the large majority of the time. There is no TURN relay configured, so a call from a corporate network or over a VPN may fail to connect (see below).
+- **NAT traversal** — Google's public STUN first, then a TURN relay as fallback. STUN alone finds a direct path only when both routers cooperate; behind a symmetric NAT, a VPN, or a corporate firewall there is no direct path at all, and without a relay the call negotiates successfully and then carries no media. The relay is Metered's free [Open Relay](https://www.metered.ca/tools/openrelay/) — best-effort and rate-limited. If you use this regularly, get your own free TURN key and replace the three `turn:` entries at the top of the `<script>` in `index.html`. Relayed media is still end-to-end encrypted; the relay forwards ciphertext.
 
 Whoever opens the room first claims the "host" ID on the broker. The second person's registration is rejected as a duplicate, which is the signal to flip to "guest" and dial the host. The guest re-dials every four seconds until answered, so it doesn't matter who arrives first.
 

@@ -186,6 +186,20 @@
   .ctl.hangup:hover { background: #ee6a6a; }
   .ctl svg { width: 22px; height: 22px; fill: currentColor; }
 
+  #tapToPlay {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    border: 0;
+    background: rgba(14,15,18,0.72);
+    backdrop-filter: blur(4px);
+    font-size: 1.05rem;
+    font-weight: 500;
+    display: none;
+    place-items: center;
+  }
+  #tapToPlay.show { display: grid; }
+
   .toast {
     position: absolute;
     bottom: calc(92px + env(safe-area-inset-bottom, 0px));
@@ -250,6 +264,8 @@
     </button>
   </div>
 
+  <button id="tapToPlay">Tap to start the video</button>
+
   <div class="toast" id="toast">Link copied</div>
 </section>
 
@@ -261,19 +277,25 @@
   // ---------------------------------------------------------------------
   // Config
   // ---------------------------------------------------------------------
-  // Home-to-home over residential internet almost always works with STUN
-  // alone. If you ever need to call from an office or over a VPN, sign up
-  // for a free TURN account and add the servers here.
+  // STUN gets a direct path when both NATs cooperate. When they don't —
+  // symmetric NAT, a VPN, a locked-down network — there is no direct path
+  // at all and the call needs a TURN relay to carry the media. These are
+  // Metered's free Open Relay credentials: fine for occasional calls,
+  // rate-limited and best-effort. For anything you depend on, get your own
+  // free TURN key at metered.ca (or Twilio) and swap the three entries.
   var ICE = {
     iceServers: [
       { urls: "stun:stun.l.google.com:19302" },
-      { urls: "stun:stun1.l.google.com:19302" }
-      // , { urls: "turn:YOUR.turn.host:443", username: "...", credential: "..." }
+      { urls: "stun:stun1.l.google.com:19302" },
+      { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
+      { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
+      { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" }
     ]
   };
 
   var PREFIX = "porch-";      // namespaces our IDs on the shared public broker
-  var DIAL_RETRY_MS = 4000;   // how often the guest re-dials until answered
+  var DIAL_RETRY_MS = 2000;   // how often the guest re-checks whether to dial
+  var ATTEMPT_GRACE_MS = 12000; // how long one attempt gets before we give up on it
 
   // ---------------------------------------------------------------------
   // State
@@ -284,7 +306,10 @@
   var role = null;            // "host" | "guest"
   var room = null;
   var dialTimer = null;
-  var connected = false;
+  var connected = false;       // ICE is up AND remote media has arrived
+  var haveRemoteStream = false;
+  var iceLive = false;
+  var attemptAt = 0;           // when the current dial attempt started
 
   // ---------------------------------------------------------------------
   // Elements
@@ -306,8 +331,16 @@
     micBtn: document.getElementById("micBtn"),
     camBtn: document.getElementById("camBtn"),
     endBtn: document.getElementById("endBtn"),
-    toast: document.getElementById("toast")
+    toast: document.getElementById("toast"),
+    tapToPlay: document.getElementById("tapToPlay")
   };
+
+  el.tapToPlay.addEventListener("click", function () {
+    el.tapToPlay.classList.remove("show");
+    el.remote.muted = false;
+    var p = el.remote.play();
+    if (p && p.catch) p.catch(function () {});
+  });
 
   function setStatus(text, kind) {
     el.statusText.textContent = text;
@@ -397,6 +430,9 @@
     });
 
     peer.on("call", function (incoming) {
+      // A re-dial supersedes whatever we had; keeping both would leave two
+      // PeerConnections fighting over the same video element.
+      if (call && call !== incoming) { try { call.close(); } catch (e) {} }
       incoming.answer(localStream);
       wireCall(incoming);
     });
@@ -420,10 +456,11 @@
       role = "guest";
       setStatus("Ringing…");
       dial();
-      dialTimer = setInterval(function () { if (!connected) dial(); }, DIAL_RETRY_MS);
+      startDialLoop();
     });
 
     peer.on("call", function (incoming) {   // host re-dialled us after a drop
+      if (call && call !== incoming) { try { call.close(); } catch (e) {} }
       incoming.answer(localStream);
       wireCall(incoming);
     });
@@ -441,41 +478,123 @@
     peer.on("disconnected", function () { if (peer && !peer.destroyed) peer.reconnect(); });
   }
 
+  function startDialLoop() {
+    clearInterval(dialTimer);
+    dialTimer = setInterval(function () { if (!connected) dial(); }, DIAL_RETRY_MS);
+  }
+
   function dial() {
     if (!peer || peer.destroyed || connected) return;
+
+    // Don't stack attempts. The old code opened a fresh PeerConnection every
+    // four seconds whether or not the previous one was still negotiating, so
+    // both ends ended up juggling several half-built connections and the
+    // surviving one was rarely the one wired to the video element.
+    if (call && Date.now() - attemptAt < ATTEMPT_GRACE_MS) return;
+    if (call) { try { call.close(); } catch (e) {} call = null; }
+
+    attemptAt = Date.now();
     var outgoing = peer.call(hostId(room), localStream);
     if (outgoing) wireCall(outgoing);
   }
 
   function wireCall(mediaConn) {
     call = mediaConn;
+    attemptAt = Date.now();
+    haveRemoteStream = false;
+    iceLive = false;
 
     mediaConn.on("stream", function (remoteStream) {
-      connected = true;
-      clearInterval(dialTimer);
+      if (mediaConn !== call) return;          // a superseded attempt
+      haveRemoteStream = true;
       el.remote.srcObject = remoteStream;
-      el.remote.classList.remove("idle");
-      el.waiting.classList.add("hide");
-      setStatus("Connected", "live");
-
-      // Safari sometimes needs the play() nudge.
-      var p = el.remote.play();
-      if (p && p.catch) p.catch(function () {});
+      setStatus("Negotiating…");
+      playRemote();
+      maybeLive();
     });
 
-    mediaConn.on("close", function () { onPeerGone(); });
-    mediaConn.on("error", function () { if (!connected) setStatus("Trouble connecting — retrying", "bad"); });
+    mediaConn.on("close", function () { if (mediaConn === call) onPeerGone(); });
+    mediaConn.on("error", function () {
+      if (mediaConn === call && !connected) setStatus("Trouble connecting — retrying", "bad");
+    });
+
+    watchIce(mediaConn);
+  }
+
+  // The "stream" event fires as soon as the remote description is set — that
+  // is negotiation finishing, not media arriving. Reporting "Connected" there
+  // is why a call with a dead ICE path still looked connected while both
+  // sides stared at a black rectangle. Wait for the ICE state instead.
+  function watchIce(mediaConn) {
+    var tries = 0;
+    (function attach() {
+      if (mediaConn !== call) return;
+      var pc = mediaConn.peerConnection;
+      if (!pc) {
+        if (++tries < 150) setTimeout(attach, 100);
+        return;
+      }
+      pc.addEventListener("iceconnectionstatechange", function () {
+        onIceState(mediaConn, pc.iceConnectionState);
+      });
+      onIceState(mediaConn, pc.iceConnectionState);
+    })();
+  }
+
+  function onIceState(mediaConn, state) {
+    if (mediaConn !== call) return;
+    if (state === "connected" || state === "completed") {
+      iceLive = true;
+      maybeLive();
+    } else if (state === "failed") {
+      iceLive = false;
+      connected = false;
+      el.waiting.classList.remove("hide");
+      setStatus("No route between you — retrying", "bad");
+      try { mediaConn.close(); } catch (e) {}
+      if (mediaConn === call) call = null;
+      if (role === "guest") { attemptAt = 0; startDialLoop(); }
+    } else if (state === "disconnected") {
+      iceLive = false;
+      setStatus("Connection dropped — reconnecting", "bad");
+    } else if (state === "checking") {
+      setStatus("Connecting…");
+    }
+  }
+
+  // Only now is there really a call: media negotiated *and* a live ICE path.
+  function maybeLive() {
+    if (!haveRemoteStream || !iceLive) return;
+    connected = true;
+    clearInterval(dialTimer);
+    dialTimer = null;
+    el.remote.classList.remove("idle");
+    el.waiting.classList.add("hide");
+    setStatus("Connected", "live");
+    playRemote();
+  }
+
+  // Autoplay with sound can be refused even after a click. If it is, ask for
+  // the tap rather than leaving a silent black frame.
+  function playRemote() {
+    var p = el.remote.play();
+    if (p && p.catch) {
+      p.catch(function () {
+        el.tapToPlay.classList.add("show");
+      });
+    }
   }
 
   function onPeerGone() {
     connected = false;
+    haveRemoteStream = false;
+    iceLive = false;
+    call = null;
     el.remote.srcObject = null;
     el.remote.classList.add("idle");
     el.waiting.classList.remove("hide");
     setStatus("The other person left");
-    if (role === "guest" && !dialTimer) {
-      dialTimer = setInterval(function () { if (!connected) dial(); }, DIAL_RETRY_MS);
-    }
+    if (role === "guest") { attemptAt = 0; startDialLoop(); }
   }
 
   function handlePeerError(e) {
