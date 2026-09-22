@@ -238,13 +238,16 @@
   <video id="remote" class="idle" autoplay playsinline></video>
 
   <div id="waiting">
-    <div>
+    <div id="waitShare" hidden>
       <p>Send this link to the other person.</p>
       <div class="code" id="codeText">—</div>
       <div>
         <button class="btn" id="copyBtn">Copy link</button>
       </div>
       <p style="margin-top:1.25rem;">The call connects on its own once they open it.</p>
+    </div>
+    <div id="waitPlain">
+      <p id="waitPlainText">Connecting…</p>
     </div>
   </div>
 
@@ -324,6 +327,9 @@
     remote: document.getElementById("remote"),
     local: document.getElementById("local"),
     waiting: document.getElementById("waiting"),
+    waitShare: document.getElementById("waitShare"),
+    waitPlain: document.getElementById("waitPlain"),
+    waitPlainText: document.getElementById("waitPlainText"),
     codeText: document.getElementById("codeText"),
     copyBtn: document.getElementById("copyBtn"),
     status: document.getElementById("status"),
@@ -341,6 +347,22 @@
     var p = el.remote.play();
     if (p && p.catch) p.catch(function () {});
   });
+
+  // The overlay used to be hardcoded to the share-the-link copy and was
+  // visible the instant the stage appeared — so whoever joined by link got a
+  // flash of "send this link to the other person" before their role was even
+  // known. Nobody sees the share copy now until we know we're the host.
+  function setWaiting(mode, text) {
+    el.waitShare.hidden = (mode !== "share");
+    el.waitPlain.hidden = (mode === "share");
+    if (text) el.waitPlainText.textContent = text;
+  }
+
+  function waitingForPeer(plainText) {
+    el.waiting.classList.remove("hide");
+    if (role === "host") setWaiting("share");
+    else setWaiting("plain", plainText);
+  }
 
   function setStatus(text, kind) {
     el.statusText.textContent = text;
@@ -409,6 +431,7 @@
     el.stage.classList.add("on");
 
     el.codeText.textContent = room;
+    setWaiting("plain", "Connecting…");
     setStatus("Connecting…");
 
     becomeHost();
@@ -426,6 +449,7 @@
 
     peer.on("open", function () {
       role = "host";
+      setWaiting("share");
       setStatus("Waiting for the other person");
     });
 
@@ -454,6 +478,7 @@
 
     peer.on("open", function () {
       role = "guest";
+      setWaiting("plain", "Reaching the other person…");
       setStatus("Ringing…");
       dial();
       startDialLoop();
@@ -549,7 +574,7 @@
     } else if (state === "failed") {
       iceLive = false;
       connected = false;
-      el.waiting.classList.remove("hide");
+      waitingForPeer("Trouble finding a route — retrying…");
       setStatus("No route between you — retrying", "bad");
       try { mediaConn.close(); } catch (e) {}
       if (mediaConn === call) call = null;
@@ -598,7 +623,7 @@
     call = null;
     el.remote.srcObject = null;
     el.remote.classList.add("idle");
-    el.waiting.classList.remove("hide");
+    waitingForPeer("The other person left — waiting for them to come back…");
     setStatus("The other person left");
     if (role === "guest") { attemptAt = 0; startDialLoop(); }
   }
