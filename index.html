@@ -575,12 +575,18 @@
   }
 
   // Autoplay with sound can be refused even after a click. If it is, ask for
-  // the tap rather than leaving a silent black frame.
+  // the tap rather than leaving a silent black frame — but a rejected play()
+  // promise does not always mean nothing is playing (the element often picks
+  // the stream up a moment later), so check before covering a live picture.
   function playRemote() {
     var p = el.remote.play();
     if (p && p.catch) {
       p.catch(function () {
-        el.tapToPlay.classList.add("show");
+        setTimeout(function () {
+          if (el.remote.paused || el.remote.readyState < 3) {
+            el.tapToPlay.classList.add("show");
+          }
+        }, 800);
       });
     }
   }
