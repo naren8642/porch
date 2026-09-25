@@ -130,6 +130,25 @@
   }
   @media (min-width: 640px) { #local { aspect-ratio: 4 / 3; width: 22vw; } }
 
+  #diag {
+    position: absolute;
+    top: calc(56px + env(safe-area-inset-top, 0px));
+    left: 50%;
+    transform: translateX(-50%);
+    margin: 0;
+    max-width: calc(100% - 32px);
+    background: rgba(26,28,33,0.94);
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    padding: 0.7rem 0.9rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.72rem;
+    line-height: 1.7;
+    color: var(--ink-dim);
+    white-space: pre-wrap;
+    z-index: 3;
+  }
+
   #status {
     position: absolute;
     top: calc(14px + env(safe-area-inset-top, 0px));
@@ -146,6 +165,7 @@
     align-items: center;
     gap: 0.5rem;
     white-space: nowrap;
+    z-index: 3;
     max-width: calc(100% - 32px);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -248,12 +268,15 @@
     </div>
     <div id="waitPlain">
       <p id="waitPlainText">Connecting…</p>
+      <div class="code" id="waitPlainCode" hidden>—</div>
+      <p id="waitPlainHint" hidden>If that code isn't the one on the other person's screen, you're in two different rooms — reopen their link.</p>
     </div>
   </div>
 
   <video id="local" autoplay playsinline muted></video>
 
-  <div id="status"><span class="dot"></span><span id="statusText">Starting…</span></div>
+  <button id="status"><span class="dot"></span><span id="statusText">Starting…</span></button>
+  <pre id="diag" hidden></pre>
 
   <div id="controls">
     <button class="ctl" id="micBtn" aria-label="Mute microphone" title="Mute microphone">
@@ -297,8 +320,10 @@
   };
 
   var PREFIX = "porch-";      // namespaces our IDs on the shared public broker
-  var DIAL_RETRY_MS = 2000;   // how often the guest re-checks whether to dial
+  var DIAL_RETRY_MS = 2000;   // how often we re-check whether to dial
   var ATTEMPT_GRACE_MS = 12000; // how long one attempt gets before we give up on it
+  var HOST_DIAL_AFTER_MS = 8000;  // host starts dialling the guest seat too
+  var RECLAIM_AFTER_MS = 20000;   // guest takes over a host seat nobody answers
 
   // ---------------------------------------------------------------------
   // State
@@ -313,6 +338,9 @@
   var haveRemoteStream = false;
   var iceLive = false;
   var attemptAt = 0;           // when the current dial attempt started
+  var roleSince = 0;           // when we settled into the current role
+  var misses = 0;              // consecutive "nobody at that seat" answers
+  var lastReclaim = 0;
 
   // ---------------------------------------------------------------------
   // Elements
@@ -330,6 +358,8 @@
     waitShare: document.getElementById("waitShare"),
     waitPlain: document.getElementById("waitPlain"),
     waitPlainText: document.getElementById("waitPlainText"),
+    waitPlainCode: document.getElementById("waitPlainCode"),
+    waitPlainHint: document.getElementById("waitPlainHint"),
     codeText: document.getElementById("codeText"),
     copyBtn: document.getElementById("copyBtn"),
     status: document.getElementById("status"),
@@ -338,8 +368,33 @@
     camBtn: document.getElementById("camBtn"),
     endBtn: document.getElementById("endBtn"),
     toast: document.getElementById("toast"),
+    diag: document.getElementById("diag"),
     tapToPlay: document.getElementById("tapToPlay")
   };
+
+  // Tap the status pill for the facts. When a call fails between two houses
+  // there is no console to read, so this is what makes a report actionable.
+  el.status.addEventListener("click", function () {
+    el.diag.hidden = !el.diag.hidden;
+    if (!el.diag.hidden) refreshDiag();
+  });
+
+  function refreshDiag() {
+    if (el.diag.hidden) return;
+    var pc = call && call.peerConnection;
+    el.diag.textContent = [
+      "room    " + room,
+      "role    " + (role || "deciding…"),
+      "my seat " + (peer && peer.id ? peer.id : "—"),
+      "dialing " + (role ? otherSeat() : "—"),
+      "ice     " + (pc ? pc.iceConnectionState : "no connection"),
+      "media   " + (haveRemoteStream ? "remote stream in" : "none") +
+                   (el.remote.videoWidth ? " " + el.remote.videoWidth + "x" + el.remote.videoHeight : ""),
+      "misses  " + misses,
+      "url     " + location.href
+    ].join("\n");
+  }
+  setInterval(refreshDiag, 1000);
 
   el.tapToPlay.addEventListener("click", function () {
     el.tapToPlay.classList.remove("show");
@@ -356,6 +411,13 @@
     el.waitShare.hidden = (mode !== "share");
     el.waitPlain.hidden = (mode === "share");
     if (text) el.waitPlainText.textContent = text;
+    // Show the joiner which room they're actually in. If the two screens
+    // disagree, the link got mangled and they're in separate rooms — which
+    // otherwise looks identical to a connection failure.
+    var showCode = (mode === "plain" && role === "guest");
+    el.waitPlainCode.hidden = !showCode;
+    el.waitPlainHint.hidden = !showCode;
+    el.waitPlainCode.textContent = room || "—";
   }
 
   function waitingForPeer(plainText) {
@@ -449,22 +511,28 @@
 
     peer.on("open", function () {
       role = "host";
+      roleSince = Date.now();
+      misses = 0;
       setWaiting("share");
       setStatus("Waiting for the other person");
+      // The guest normally dials us, but that was the only path that existed:
+      // if its dial never landed — a stale seat, a broker hiccup, a dropped
+      // WebSocket — nothing on either side ever tried again, and both people
+      // sat staring at a waiting screen. Dial the guest seat too after a
+      // grace period, so the rendezvous works if *either* direction does.
+      startDialLoop();
     });
 
     peer.on("call", function (incoming) {
-      // A re-dial supersedes whatever we had; keeping both would leave two
-      // PeerConnections fighting over the same video element.
-      if (call && call !== incoming) { try { call.close(); } catch (e) {} }
-      incoming.answer(localStream);
-      wireCall(incoming);
+      answerIncoming(incoming);
     });
 
     peer.on("error", function (e) {
       if (e.type === "unavailable-id" && role === null) {
         peer.destroy();
         becomeGuest();
+      } else if (e.type === "peer-unavailable") {
+        onSeatEmpty();            // guest simply hasn't arrived yet
       } else {
         handlePeerError(e);
       }
@@ -478,23 +546,23 @@
 
     peer.on("open", function () {
       role = "guest";
+      roleSince = Date.now();
+      misses = 0;
       setWaiting("plain", "Reaching the other person…");
       setStatus("Ringing…");
       dial();
       startDialLoop();
     });
 
-    peer.on("call", function (incoming) {   // host re-dialled us after a drop
-      if (call && call !== incoming) { try { call.close(); } catch (e) {} }
-      incoming.answer(localStream);
-      wireCall(incoming);
+    peer.on("call", function (incoming) {   // the other side dialled us
+      answerIncoming(incoming);
     });
 
     peer.on("error", function (e) {
       if (e.type === "unavailable-id") {
         setStatus("This call already has two people in it", "bad");
       } else if (e.type === "peer-unavailable") {
-        if (!connected) setStatus("Waiting for the other person");
+        onSeatEmpty();
       } else {
         handlePeerError(e);
       }
@@ -503,13 +571,60 @@
     peer.on("disconnected", function () { if (peer && !peer.destroyed) peer.reconnect(); });
   }
 
+  // Now that both sides dial, the two can cross on the wire. Whichever call
+  // is already carrying media wins; a stray second one is refused rather
+  // than allowed to supersede it.
+  function answerIncoming(incoming) {
+    if (connected && call && call !== incoming) {
+      try { incoming.close(); } catch (e) {}
+      return;
+    }
+    if (call && call !== incoming) { try { call.close(); } catch (e) {} }
+    incoming.answer(localStream);
+    wireCall(incoming);
+  }
+
+  // "Nobody is registered at that seat." Normal while you wait for someone to
+  // arrive — but if we're the guest and the host seat stays silent long past
+  // the point where a real host would have answered, that seat is most likely
+  // a dead tab holding the room hostage. Take it over.
+  function onSeatEmpty() {
+    if (connected) return;
+    misses++;
+    if (role === "host") return;   // just means the guest isn't here yet
+    setStatus("Waiting for the other person");
+    var waited = Date.now() - roleSince;
+    if (misses >= 3 && waited > RECLAIM_AFTER_MS && Date.now() - lastReclaim > 30000) {
+      lastReclaim = Date.now();
+      reclaimHostSeat();
+    }
+  }
+
+  function reclaimHostSeat() {
+    if (connected) return;
+    setStatus("Reopening the room…");
+    clearInterval(dialTimer);
+    dialTimer = null;
+    if (call) { try { call.close(); } catch (e) {} call = null; }
+    if (peer) { try { peer.destroy(); } catch (e) {} }
+    role = null;
+    misses = 0;
+    becomeHost();   // if the old host really is alive we'll be bounced back to guest
+  }
+
+  function otherSeat() { return role === "host" ? guestId(room) : hostId(room); }
+
   function startDialLoop() {
     clearInterval(dialTimer);
     dialTimer = setInterval(function () { if (!connected) dial(); }, DIAL_RETRY_MS);
   }
 
   function dial() {
-    if (!peer || peer.destroyed || connected) return;
+    if (!peer || peer.destroyed || connected || !role) return;
+
+    // The host gives the guest a head start before dialling back, so the
+    // normal case stays a single call in one direction.
+    if (role === "host" && Date.now() - roleSince < HOST_DIAL_AFTER_MS) return;
 
     // Don't stack attempts. The old code opened a fresh PeerConnection every
     // four seconds whether or not the previous one was still negotiating, so
@@ -519,7 +634,7 @@
     if (call) { try { call.close(); } catch (e) {} call = null; }
 
     attemptAt = Date.now();
-    var outgoing = peer.call(hostId(room), localStream);
+    var outgoing = peer.call(otherSeat(), localStream);
     if (outgoing) wireCall(outgoing);
   }
 
@@ -578,7 +693,7 @@
       setStatus("No route between you — retrying", "bad");
       try { mediaConn.close(); } catch (e) {}
       if (mediaConn === call) call = null;
-      if (role === "guest") { attemptAt = 0; startDialLoop(); }
+      attemptAt = 0; startDialLoop();
     } else if (state === "disconnected") {
       iceLive = false;
       setStatus("Connection dropped — reconnecting", "bad");
@@ -591,6 +706,7 @@
   function maybeLive() {
     if (!haveRemoteStream || !iceLive) return;
     connected = true;
+    misses = 0;
     clearInterval(dialTimer);
     dialTimer = null;
     el.remote.classList.remove("idle");
@@ -625,7 +741,7 @@
     el.remote.classList.add("idle");
     waitingForPeer("The other person left — waiting for them to come back…");
     setStatus("The other person left");
-    if (role === "guest") { attemptAt = 0; startDialLoop(); }
+    attemptAt = 0; startDialLoop();
   }
 
   function handlePeerError(e) {
